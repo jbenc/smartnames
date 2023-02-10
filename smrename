@@ -27,11 +27,11 @@ class ActionBase:
     def config(self, parsed_args, *args):
         return
 
-    def analyze(self, name):
+    def analyze(self, name, ext):
         return
 
-    def convert(self, name):
-        return name
+    def convert(self, name, ext):
+        return name, ext
 
 
 class ActionArgumentBase(ActionBase):
@@ -70,38 +70,38 @@ class SubstActionSpecial(ActionBase):
         self.pattern = re.compile(parts[1], re_flags)
         self.repl = parts[2]
 
-    def convert(self, name):
-        return self.pattern.sub(self.repl, name, count=self.count)
+    def convert(self, name, ext):
+        return self.pattern.sub(self.repl, name, count=self.count), ext
 
 
 class WeirdCharsAction(ActionBase):
     short_opt = 'w'
     help = 'convert weird chars to hyphens (-) and spaces'
 
-    def convert(self, name):
+    def convert(self, name, ext):
         name = re.sub(r'["()\[\]!:]', '-', name)
         name = re.sub(r'[,]', ' ', name)
-        return name
+        return name, ext
 
 
 class UnderscoreAction(ActionBase):
     short_opt = '_'
     help = 'convert spaces to underscores'
 
-    def convert(self, name):
-        return re.sub(r'\s', '_', name)
+    def convert(self, name, ext):
+        return re.sub(r'\s', '_', name), ext
 
 
 class JoinAction(ActionBase):
     short_opt = 'j'
     help = 'join consecutive - and _ characters into one'
 
-    def convert(self, name):
+    def convert(self, name, ext):
         name = re.sub(r'[_-]*-[_-]*', '-', name)
         name = re.sub(r'_+', '_', name)
         name = re.sub(r'^[_-]+', '', name)
         name = re.sub(r'[_-]+$', '', name)
-        return name
+        return name, ext
 
 
 class TransliterateAction(ActionBase):
@@ -111,8 +111,17 @@ class TransliterateAction(ActionBase):
     def __init__(self):
         self.conv = iconv.open('ascii//TRANSLIT', 'utf-8')
 
-    def convert(self, name):
-        return self.conv.iconv(name.encode('utf-8')).decode('ascii')
+    def convert(self, name, ext):
+        return (self.conv.iconv(name.encode('utf-8')).decode('ascii'),
+                self.conv.iconv(ext.encode('utf-8')).decode('ascii'))
+
+
+class LowerExtensionAction(ActionBase):
+    short_opt = 'e'
+    help = 'lower case the last file extension'
+
+    def convert(self, name, ext):
+        return name, ext.lower()
 
 
 class ShiftAction(ActionArgumentBase):
@@ -120,15 +129,15 @@ class ShiftAction(ActionArgumentBase):
     help = 'shift the first number in the name by the given amount'
     arg_type = int
 
-    def convert(self, name):
+    def convert(self, name, ext):
         m = re.search('[0-9]+', name)
         if m is None:
-            return name
+            return name, ext
         new = int(m[0]) + self.value
         if new < 0:
             raise ActionError(f"Cannot shift '{name}' by {self.value}: the result would be negative")
         new = '{0:0{1}}'.format(new, len(m[0]))
-        return name[:m.start()] + new + name[m.end():]
+        return name[:m.start()] + new + name[m.end():], ext
 
 
 class DigitsAction(ActionBase):
@@ -138,7 +147,7 @@ class DigitsAction(ActionBase):
     def __init__(self):
         self.digits = 0
 
-    def analyze(self, name):
+    def analyze(self, name, ext):
         m = re.search('[0-9]+', name)
         if m is None:
             return
@@ -146,12 +155,12 @@ class DigitsAction(ActionBase):
         if width > self.digits:
             self.digits = width
 
-    def convert(self, name):
+    def convert(self, name, ext):
         m = re.search('[0-9]+', name)
         if m is None:
-            return name
+            return name, ext
         new = '{0:0{1}}'.format(int(m[0]), self.digits)
-        return name[:m.start()] + new + name[m.end():]
+        return name[:m.start()] + new + name[m.end():], ext
 
 
 def parse_args():
@@ -221,20 +230,22 @@ try:
     for file in files:
         p = pathlib.Path(file)
         name = p.stem
+        ext = p.suffix
         for a in actions:
-            a.analyze(name)
-            name = a.convert(name)
+            a.analyze(name, ext)
+            name, ext = a.convert(name, ext)
     # get the new names
     renames = {}
     sorter = graphlib.TopologicalSorter()
     for file in files:
         p = pathlib.Path(file)
         name = p.stem
+        ext = p.suffix
         for a in actions:
-            name = a.convert(name)
-        if name == p.stem:
+            name, ext = a.convert(name, ext)
+        if name == p.stem and ext == p.suffix:
             continue
-        new = p.with_stem(name)
+        new = p.with_stem(name).with_suffix(ext)
         if str(p) in renames:
             sys.stderr.write(f"Error: file '{file}' specified twice.\n")
             sys.exit(2)
