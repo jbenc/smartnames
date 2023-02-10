@@ -1,0 +1,280 @@
+#!/usr/bin/python3
+import argparse, graphlib, iconv, pathlib, re, shlex, sys
+
+class ActionError(Exception):
+    pass
+
+class ActionBase:
+    short_opt = None
+    help = None
+    in_all = True
+    arg_action = 'store_const'
+    arg_type = None
+
+    def add_argument(self, parser):
+        args = []
+        if self.short_opt:
+            args.append('-' + self.short_opt)
+        self.long_opt = self.__class__.__name__.removesuffix('Action').lower()
+        args.append('--' + self.long_opt)
+        kwargs = { 'action': self.arg_action, 'const': self }
+        if self.help:
+            kwargs['help'] = self.help
+        if self.arg_type:
+            kwargs['type'] = self.arg_type
+        parser.add_argument(*args, **kwargs)
+
+    def config(self, parsed_args, *args):
+        return
+
+    def analyze(self, name):
+        return
+
+    def convert(self, name):
+        return name
+
+
+class ActionArgumentBase(ActionBase):
+    class StoreArg(argparse.Action):
+        def __init__(self, option_strings, dest, nargs=None, const=None, **kwargs):
+            super().__init__(option_strings, dest, **kwargs)
+            self.const = const
+        def __call__(self, parser, namespace, values, option_string=None):
+            setattr(namespace, self.dest, (self.const, values))
+
+    in_all = False
+    arg_action = StoreArg
+
+    def config(self, parsed_args, value):
+        self.value = value
+
+
+# The actions will be executed in the order they are defined below. (The Subst action
+# is handled specially, though.)
+
+class SubstActionSpecial(ActionBase):
+    def __init__(self, pattern):
+        parts = pattern.split('/')
+        if len(parts) != 4:
+            raise ActionError('must be in the form s/pattern/repl/flags')
+        self.count = 1
+        re_flags = 0
+        flags = parts[3]
+        for f in flags:
+            if f == 'i':
+                re_flags |= re.I
+            elif f == 'g':
+                self.count = 0
+            else:
+                raise ActionError('only "i" and "g" flags are supported')
+        self.pattern = re.compile(parts[1], re_flags)
+        self.repl = parts[2]
+
+    def convert(self, name):
+        return self.pattern.sub(self.repl, name, count=self.count)
+
+
+class WeirdCharsAction(ActionBase):
+    short_opt = 'w'
+    help = 'convert weird chars to hyphens (-) and spaces'
+
+    def convert(self, name):
+        name = re.sub(r'["()\[\]!:]', '-', name)
+        name = re.sub(r'[,]', ' ', name)
+        return name
+
+
+class UnderscoreAction(ActionBase):
+    short_opt = '_'
+    help = 'convert spaces to underscores'
+
+    def convert(self, name):
+        return re.sub(r'\s', '_', name)
+
+
+class JoinAction(ActionBase):
+    short_opt = 'j'
+    help = 'join consecutive - and _ characters into one'
+
+    def convert(self, name):
+        name = re.sub(r'[_-]*-[_-]*', '-', name)
+        name = re.sub(r'_+', '_', name)
+        name = re.sub(r'^[_-]+', '', name)
+        name = re.sub(r'[_-]+$', '', name)
+        return name
+
+
+class TransliterateAction(ActionBase):
+    short_opt = 't'
+    help = 'convert names to ascii'
+
+    def __init__(self):
+        self.conv = iconv.open('ascii//TRANSLIT', 'utf-8')
+
+    def convert(self, name):
+        return self.conv.iconv(name.encode('utf-8')).decode('ascii')
+
+
+class ShiftAction(ActionArgumentBase):
+    short_opt = 's'
+    help = 'shift the first number in the name by the given amount'
+    arg_type = int
+
+    def convert(self, name):
+        m = re.search('[0-9]+', name)
+        if m is None:
+            return name
+        new = int(m[0]) + self.value
+        if new < 0:
+            raise ActionError(f"Cannot shift '{name}' by {self.value}: the result would be negative")
+        new = '{0:0{1}}'.format(new, len(m[0]))
+        return name[:m.start()] + new + name[m.end():]
+
+
+class DigitsAction(ActionBase):
+    short_opt = 'd'
+    help = 'normalize number of digits in the first number in the name'
+
+    def __init__(self):
+        self.digits = 0
+
+    def analyze(self, name):
+        m = re.search('[0-9]+', name)
+        if m is None:
+            return
+        width = len(str(int(m[0])))
+        if width > self.digits:
+            self.digits = width
+
+    def convert(self, name):
+        m = re.search('[0-9]+', name)
+        if m is None:
+            return name
+        new = '{0:0{1}}'.format(int(m[0]), self.digits)
+        return name[:m.start()] + new + name[m.end():]
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description='Rename files in a smart way')
+    ap.add_argument('--dry', action='store_true',
+                    help='do not actually rename anything')
+    all_actions = []
+    for k, v in globals().items():
+        if k.endswith('Action'):
+            action = v()
+            action.add_argument(ap)
+            if action.in_all:
+                all_actions.append(action)
+    ap.add_argument('-a', '--all', action='store_true',
+                    help='the same as ' + ' '.join('--' + a.long_opt for a in all_actions))
+    ap.add_argument('file0', metavar='s//', nargs='?',
+                    help='substitution to run on the file name; this happens first')
+    ap.add_argument('files', nargs=argparse.REMAINDER,
+                    help='files to rename')
+    args = ap.parse_args()
+    if args.file0 is None:
+        ap.print_help()
+        sys.exit(0)
+
+    actions = []
+    for act in vars(args).values():
+        if isinstance(act, ActionBase):
+            actions.append((act,))
+        elif isinstance(act, tuple) and isinstance(act[0], ActionBase):
+            actions.append(act)
+    files = args.files
+
+    if args.file0.startswith('s/'):
+        # the subst goes first
+        try:
+            actions.insert(0, (SubstActionSpecial(args.file0),))
+        except ActionError as e:
+            sys.stderr.write(f"Error: bad pattern '{args.files0}': {e}\n")
+            sys.exit(2)
+    else:
+        # the first parameter is a file name
+        files.insert(0, args.file0)
+    if args.all:
+        actions.extend((act,) for act in all_actions)
+
+    if not files:
+        sys.stderr.write('Error: no file specified.\n')
+        sys.exit(2)
+    if not actions:
+        sys.stderr.write('Error: no action specified.\n')
+        sys.exit(2)
+
+    try:
+        for a in actions:
+            a[0].config(args, *a[1:])
+    except ActionError as e:
+        sys.stderr.write(f'Error: {e}\n')
+        sys.exit(2)
+
+    return [a[0] for a in actions], files, args.dry
+
+
+actions, files, dry_run = parse_args()
+
+try:
+    # run the analyze methods
+    for file in files:
+        p = pathlib.Path(file)
+        name = p.stem
+        for a in actions:
+            a.analyze(name)
+            name = a.convert(name)
+    # get the new names
+    renames = {}
+    sorter = graphlib.TopologicalSorter()
+    for file in files:
+        p = pathlib.Path(file)
+        name = p.stem
+        for a in actions:
+            name = a.convert(name)
+        if name == p.stem:
+            continue
+        new = p.with_stem(name)
+        if str(p) in renames:
+            sys.stderr.write(f"Error: file '{file}' specified twice.\n")
+            sys.exit(2)
+        renames[str(p)] = new
+        sorter.add(str(p), str(new))
+except ActionError as e:
+    sys.stderr.write(f'Error: {e}\n')
+    sys.exit(1)
+# check that the renaming is safe
+for file, dst in renames.items():
+    if not pathlib.Path(file).exists():
+        sys.stderr.write(f"Error: file '{file}' does not exist.\n")
+        sys.exit(1)
+    if str(dst) in renames:
+        # topologic order will take care of vacating this name
+        continue
+    if dst.exists():
+        sys.stderr.write(f"Error: renaming of '{file}' would overwrite existing '{dst}'.\n")
+        sys.exit(1)
+# get the rename order
+try:
+    # we're interested only in the source file names
+    order = [file for file in sorter.static_order() if file in renames]
+except graphlib.CycleError:
+    sys.stderr.write('Error: cannot rename safely; a cycle was detected.\n')
+    sys.exit(1)
+if not order:
+    print('Nothing to do.')
+    sys.exit(0)
+# create the undo file
+if not dry_run:
+    backup = open(pathlib.Path.home() / '.smrename.undo', 'w')
+    backup.write('cd {}\n'.format(shlex.quote(str(pathlib.Path.cwd()))))
+    for file in reversed(order):
+        backup.write('mv {} {}\n'.format(shlex.quote(str(renames[file])), shlex.quote(file)))
+    backup.close()
+# rename the files
+for file in order:
+    print(f'{file} => {renames[file]}')
+    if not dry_run:
+        pathlib.Path(file).rename(renames[file])
+if not dry_run:
+    print("Undo script is in '~/.smrename.undo'.")
