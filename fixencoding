@@ -1,0 +1,120 @@
+#!/usr/bin/python3
+import argparse, os, sys, unicodedata
+
+EXTRA = '\u00a0–´’'
+
+
+class Warning(Exception):
+    pass
+
+
+class EncodingBase:
+    code = None
+    alphabet = ''
+    extended_alphabet = ''
+    encodings = ()
+
+    def _check(self, str_name, alphabet):
+        return all(ord(ch) < 128 or ch in alphabet for ch in str_name)
+
+    def _utf8(self, name):
+        alphabet = self.alphabet + self.extended_alphabet + EXTRA
+        try:
+            if self._check(unicodedata.normalize('NFC', name.decode('utf-8')), alphabet):
+                return True
+        except UnicodeDecodeError:
+            pass
+        return False
+
+    def _single(self, name, alphabet):
+        for enc in self.encodings:
+            try:
+                s = name.decode(enc)
+            except UnicodeDecodeError:
+                continue
+            if self._check(s, alphabet):
+                return s
+        raise Warning(f'Cannot decode name {name}')
+
+    # double encoding
+    def _double(self, name, alphabet):
+        for enc in self.encodings:
+            try:
+                s = name.decode('utf-8').encode(enc).decode('utf-8')
+            except (UnicodeDecodeError, UnicodeEncodeError):
+                continue
+            s = unicodedata.normalize('NFC', s)
+            if self._check(s, alphabet):
+                return s
+        raise Warning(f'Cannot decode name {name}')
+
+    def fix(self, name):
+        if self._utf8(name):
+            # a valid name; nothing to do
+            return None
+        try:
+            return self._single(name, self.alphabet)
+        except Warning:
+            pass
+        try:
+            return self._double(name, self.alphabet)
+        except Warning:
+            pass
+        alphabet = self.alphabet + self.extended_alphabet
+        try:
+            return self._single(name, alphabet)
+        except Warning:
+            pass
+        return self._double(name, alphabet)
+
+
+class Czech(EncodingBase):
+    code = 'cs'
+    alphabet = 'áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ'
+    extended_alphabet = 'äąâåćęëèĺľłńöôőøŕśüźżÄĄÂÅĆĘËÈĹĽŁŃÖÔŐØŔŚÜŹŻ'
+    encodings = ('windows-1250', 'iso-8859-2', 'cp852', 'mac-latin2')
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description='Fix file names in the current directory and '
+                                             'its subdirectories.')
+    ap.add_argument('--dry', action='store_true',
+                    help='do not actually rename anything')
+    langs = {}
+    for v in globals().values():
+        if type(v) is type and issubclass(v, EncodingBase) and v is not EncodingBase:
+            langs[v.code] = v
+    codes = ', '.join(langs.keys())
+    ap.add_argument('language',
+                    help=f'the language the file names are in; supported laguages: {codes}')
+    args = ap.parse_args()
+    try:
+        lang = langs[args.language]
+    except KeyError:
+        sys.stderr.write(f"Unsupported language: '{args.language}'\n")
+        sys.exit(2)
+    return lang(), args.dry
+
+
+def walk(path):
+    with os.scandir(path) as it:
+        for entry in it:
+            if entry.is_dir() and not entry.is_symlink():
+                yield from walk(entry.path)
+            yield (path, entry.name)
+
+
+lang, dry_run = parse_args()
+for path, name in walk(b'.'):
+    try:
+        fixed = lang.fix(name)
+        if fixed:
+            old = os.path.join(path, name)
+            new = os.path.join(path, fixed.encode('utf-8'))
+            print(f'fixing {new.decode(errors="replace")}')
+            if os.path.exists(new):
+                print(f'ERROR: {new.decode(errors="replace")}: already exists')
+            elif not dry_run:
+                os.rename(old, new)
+    except Warning as e:
+        print(f'ERROR: {path.decode(errors="replace")}: {e}')
