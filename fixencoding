@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 import argparse, os, sys, unicodedata
 
-EXTRA = '\u00a0–´’'
+EXTRA = '\u00a0–´’↑↓×'
 
 
 class Warning(Exception):
@@ -71,7 +71,7 @@ class EncodingBase:
 class Czech(EncodingBase):
     code = 'cs'
     alphabet = 'áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ'
-    extended_alphabet = 'äąâåćęëèĺľłńöôőøŕśüźżÄĄÂÅĆĘËÈĹĽŁŃÖÔŐØŔŚÜŹŻ'
+    extended_alphabet = 'äąâåæćçðęëèĺľłńñöôőøŕśßüûÿźżÄĄÂÅÆĆÇÐĘËÈĹĽŁŃÑÖÔŐØŔŚÜÛŸŹŻ'
     encodings = ('windows-1250', 'iso-8859-2', 'cp852', 'mac-latin2')
 
 
