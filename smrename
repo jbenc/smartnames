@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import argparse, graphlib, iconv, pathlib, re, shlex, sys
+import argparse, graphlib, pathlib, re, shlex, sys, unidecode
 
 class ActionError(Exception):
     pass
@@ -108,12 +108,8 @@ class TransliterateAction(ActionBase):
     short_opt = 't'
     help = 'convert names to ascii'
 
-    def __init__(self):
-        self.conv = iconv.open('ascii//TRANSLIT', 'utf-8')
-
     def convert(self, name, ext):
-        return (self.conv.iconv(name.encode('utf-8')).decode('ascii'),
-                self.conv.iconv(ext.encode('utf-8')).decode('ascii'))
+        return unidecode.unidecode(name), unidecode.unidecode(ext)
 
 
 class LowerExtensionAction(ActionBase):
